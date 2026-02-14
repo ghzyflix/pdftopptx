@@ -1,6 +1,7 @@
 """PPTX generation from extracted PDF page data.
 
-Reconstructs slides with precise positioning of text, images, and shapes.
+Reconstructs slides with precise positioning of text, images, shapes,
+hyperlinks, and background colors.
 """
 
 import math
@@ -11,6 +12,7 @@ from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_AUTO_SIZE
+from pptx.oxml.ns import qn
 from pptx.util import Pt
 
 from coord_utils import PT_TO_EMU, bbox_to_position_size, pt_to_emu
@@ -66,22 +68,41 @@ def build_pptx(
 
 def _build_slide(slide, page_data: PageData) -> None:
     """Populate a single slide with all extracted content."""
-    # Full-page fallback takes priority
+    # Apply background color
+    if page_data.background_color:
+        _set_slide_background(slide, page_data.background_color)
+
+    # Full-page fallback takes priority (replaces everything)
     if page_data.fallback_image:
         _add_fullpage_image(slide, page_data)
         return
 
-    # Layer 1: Images (behind everything)
+    # Hybrid mode: background render + text overlay
+    if page_data.background_render:
+        _add_background_render(slide, page_data)
+        # Then add text on top for searchability
+        for block in page_data.text_blocks:
+            _add_text_block(slide, block)
+        return
+
+    # Normal mode: Layer 1 -> Images, Layer 2 -> Drawings, Layer 3 -> Text
     for img in page_data.images:
         _add_image(slide, img)
 
-    # Layer 2: Vector drawings
     for drawing in page_data.drawings:
         _add_drawing(slide, drawing)
 
-    # Layer 3: Text (on top)
     for block in page_data.text_blocks:
         _add_text_block(slide, block)
+
+
+def _set_slide_background(slide, color_rgb: tuple) -> None:
+    """Set the slide background to a solid color."""
+    background = slide.background
+    fill = background.fill
+    fill.solid()
+    r, g, b = color_rgb
+    fill.fore_color.rgb = RGBColor(r, g, b)
 
 
 def _add_text_block(slide, block: TextBlock) -> None:
@@ -132,6 +153,10 @@ def _add_text_block(slide, block: TextBlock) -> None:
             r, g, b = span.color_rgb
             font.color.rgb = RGBColor(r, g, b)
 
+            # Apply hyperlink
+            if span.hyperlink and span.hyperlink.startswith(("http://", "https://", "mailto:")):
+                run.hyperlink.address = span.hyperlink
+
         # Handle rotated text
         dx, dy = line.direction
         if abs(dx) < 0.99 or abs(dy) > 0.01:
@@ -160,19 +185,15 @@ def _add_drawing(slide, drawing: DrawingPath) -> None:
     )
 
     if has_curves:
-        # Bezier curves are not supported by FreeformBuilder.
-        # Render as a rectangle with fill as approximation.
         _add_rect_shape(slide, drawing)
         return
 
-    # Simple rectangle detection
     if len(drawing.items) == 1:
         item = drawing.items[0]
         if isinstance(item, (list, tuple)) and len(item) > 0 and item[0] == "re":
             _add_rect_shape(slide, drawing)
             return
 
-    # Use freeform for line-based paths
     _add_freeform_drawing(slide, drawing)
 
 
@@ -185,7 +206,6 @@ def _add_rect_shape(slide, drawing: DrawingPath) -> None:
 
     shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
 
-    # Apply fill
     if drawing.fill_color:
         shape.fill.solid()
         r, g, b = [max(0, min(255, int(c * 255))) for c in drawing.fill_color]
@@ -193,7 +213,6 @@ def _add_rect_shape(slide, drawing: DrawingPath) -> None:
     else:
         shape.fill.background()
 
-    # Apply stroke
     if drawing.stroke_color and drawing.line_width > 0:
         r, g, b = [max(0, min(255, int(c * 255))) for c in drawing.stroke_color]
         shape.line.color.rgb = RGBColor(r, g, b)
@@ -222,7 +241,7 @@ def _add_freeform_drawing(slide, drawing: DrawingPath) -> None:
 
             cmd = item[0]
 
-            if cmd == "l":  # line segment
+            if cmd == "l":
                 p1, p2 = item[1], item[2]
                 p1x = getattr(p1, "x", p1[0] if isinstance(p1, (list, tuple)) else 0) - x0
                 p1y = getattr(p1, "y", p1[1] if isinstance(p1, (list, tuple)) else 0) - y0
@@ -234,7 +253,7 @@ def _add_freeform_drawing(slide, drawing: DrawingPath) -> None:
                     first_move = False
                 builder.add_line_segments([(p2x, p2y)], close=False)
 
-            elif cmd == "re":  # rectangle
+            elif cmd == "re":
                 rect_obj = item[1]
                 if hasattr(rect_obj, "x0"):
                     rx0 = rect_obj.x0 - x0
@@ -252,7 +271,7 @@ def _add_freeform_drawing(slide, drawing: DrawingPath) -> None:
                     close=True,
                 )
 
-            elif cmd == "qu":  # quad
+            elif cmd == "qu":
                 quad = item[1]
                 if hasattr(quad, "ul"):
                     pts = [
@@ -273,7 +292,6 @@ def _add_freeform_drawing(slide, drawing: DrawingPath) -> None:
         origin_y = pt_to_emu(y0)
         shape = builder.convert_to_shape(origin_x, origin_y)
 
-        # Apply fill
         if drawing.fill_color:
             shape.fill.solid()
             r, g, b = [max(0, min(255, int(c * 255))) for c in drawing.fill_color]
@@ -281,7 +299,6 @@ def _add_freeform_drawing(slide, drawing: DrawingPath) -> None:
         else:
             shape.fill.background()
 
-        # Apply stroke
         if drawing.stroke_color and drawing.line_width > 0:
             r, g, b = [max(0, min(255, int(c * 255))) for c in drawing.stroke_color]
             shape.line.color.rgb = RGBColor(r, g, b)
@@ -290,13 +307,20 @@ def _add_freeform_drawing(slide, drawing: DrawingPath) -> None:
             shape.line.fill.background()
 
     except Exception:
-        # Fall back to rectangle if freeform fails
         _add_rect_shape(slide, drawing)
 
 
 def _add_fullpage_image(slide, page_data: PageData) -> None:
     """Place a full-page raster image covering the entire slide."""
     image_stream = BytesIO(page_data.fallback_image)
+    width = pt_to_emu(page_data.width)
+    height = pt_to_emu(page_data.height)
+    slide.shapes.add_picture(image_stream, 0, 0, width, height)
+
+
+def _add_background_render(slide, page_data: PageData) -> None:
+    """Place a rendered background image for hybrid mode."""
+    image_stream = BytesIO(page_data.background_render)
     width = pt_to_emu(page_data.width)
     height = pt_to_emu(page_data.height)
     slide.shapes.add_picture(image_stream, 0, 0, width, height)

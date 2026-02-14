@@ -8,6 +8,14 @@ from typing import List, Optional, Tuple
 
 
 @dataclass
+class HyperlinkInfo:
+    """A hyperlink associated with a region on a page."""
+    bbox: Tuple[float, float, float, float]
+    uri: str
+    is_external: bool = True
+
+
+@dataclass
 class TextSpan:
     """A run of text with uniform formatting."""
     text: str
@@ -20,6 +28,7 @@ class TextSpan:
     is_bold: bool
     is_italic: bool
     is_superscript: bool = False
+    hyperlink: Optional[str] = None
 
 
 @dataclass
@@ -73,4 +82,8 @@ class PageData:
     text_blocks: List[TextBlock] = field(default_factory=list)
     images: List[ImageElement] = field(default_factory=list)
     drawings: List[DrawingPath] = field(default_factory=list)
+    hyperlinks: List[HyperlinkInfo] = field(default_factory=list)
     fallback_image: Optional[bytes] = None
+    background_color: Optional[Tuple[int, int, int]] = None
+    # For hybrid mode: high-res background + text overlay
+    background_render: Optional[bytes] = None

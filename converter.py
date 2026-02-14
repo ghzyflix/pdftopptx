@@ -29,6 +29,8 @@ def convert_pdf_to_pptx(
     pptx_path: str,
     progress_callback: Optional[Callable[[str, float], None]] = None,
     fallback_dpi: int = 300,
+    page_range: Optional[str] = None,
+    hybrid_mode: bool = False,
 ) -> None:
     """Convert a PDF file to PPTX with maximum fidelity.
 
@@ -37,6 +39,8 @@ def convert_pdf_to_pptx(
         pptx_path: Output PPTX file path.
         progress_callback: Called with (status_text, progress_fraction 0.0-1.0).
         fallback_dpi: DPI for raster fallback of complex pages.
+        page_range: Page range string (e.g. "1-5", "1,3,7"). None = all pages.
+        hybrid_mode: If True, render pages as background images with text overlay.
     """
     progress = ConversionProgress(progress_callback)
 
@@ -45,6 +49,8 @@ def convert_pdf_to_pptx(
         pdf_path,
         progress_callback=lambda cur, tot: progress.update("extract", cur, tot),
         fallback_dpi=fallback_dpi,
+        page_range=page_range,
+        hybrid_mode=hybrid_mode,
     )
 
     if not pages:
